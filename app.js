@@ -36,6 +36,7 @@ const ICON = {
   wrench: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   okc: '<circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/>',
+  cloud: '<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 9a4.5 4.5 0 0 1-.5 9z"/>',
   money: '<path d="M12 3v18M17 7H9.5a2.5 2.5 0 0 0 0 5h5a2.5 2.5 0 0 1 0 5H6"/>',
 };
 const ic = (n, s = 20) => `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON[n]}</svg>`;
@@ -65,7 +66,16 @@ const CFG_KEY = 'os_cfg';
 const CFG_DEF = { nome: 'EG Garage', sub: 'Oficina Mecânica', cnpj: '', telefone: '', email: '', endereco: '', responsavel: 'Enzo Giovanne', prox: 1, logo: '', logoW: 0, logoH: 0 };
 let cfg = { ...CFG_DEF };
 try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { }
-function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { toast('Não foi possível salvar as configurações'); } }
+function saveCfg(fromCloud) {
+  if (!fromCloud) { cfg._u = new Date().toISOString(); if (Cloud.on) { Cloud.cfgDirty(); syncLater(); } }
+  try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { toast('Não foi possível salvar as configurações'); }
+}
+let syncT;
+function syncLater(ms = 1500) { if (!Cloud.on) return; clearTimeout(syncT); syncT = setTimeout(() => Cloud.sync().then(afterSync), ms); }
+function afterSync(changed) {
+  // atualiza a tela com dados vindos de outros aparelhos (nunca no meio do preenchimento de uma OS)
+  if (changed && !document.body.classList.contains('wz') && !document.querySelector('input:focus,textarea:focus')) render();
+}
 
 /* ===================== banco (IndexedDB) ===================== */
 const DB = (() => {
@@ -136,13 +146,14 @@ function setTop(title, back) {
 }
 async function render() {
   const [r, arg] = (location.hash.slice(2) || 'inicio').split('/');
+  if (Cloud.on && !Cloud.user) return vLogin();
   document.body.className = '';
   $$('#tabbar a').forEach(a => a.classList.toggle('on', a.dataset.r === r));
   window.scrollTo(0, 0);
   try {
     switch (r) {
       case 'inicio': return await vHome();
-      case 'nova': return vNova();
+      case 'nova': return await vNova();
       case 'editar': return await vEditar(arg);
       case 'ordens': return await vOrdens(decodeURIComponent(arg || ''));
       case 'os': return await vOS(arg);
@@ -207,47 +218,98 @@ async function vOrdens(q0) {
 }
 
 /* ===================== CLIENTES ===================== */
-async function vClientes() {
-  setTop('Clientes');
+const norm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+const cliKey = c => String(c.telefone || '').replace(/\D/g, '') || norm(c.nome);
+const veiTxt = v => `${v.modelo || 'Veículo'}${v.placa ? ' · ' + v.placa : ''}`;
+// Monta a lista de clientes a partir das OS (mais recentes primeiro), com os veículos de cada um
+async function clientesIndex() {
   const all = await DB.all(), map = new Map();
   all.forEach(o => {
-    const k = (o.cliente.telefone.replace(/\D/g, '') || o.cliente.nome.trim().toLowerCase()); if (!k) return;
-    const c = map.get(k) || { nome: o.cliente.nome, tel: o.cliente.telefone, veic: new Set(), n: 0, ult: o.createdAt };
-    c.veic.add(`${o.veiculo.modelo} · ${(o.veiculo.placa || '').toUpperCase()}`); c.n++; if (o.createdAt > c.ult) c.ult = o.createdAt; map.set(k, c);
+    if (state.draft && o.id === state.draft.id) return;
+    const k = cliKey(o.cliente); if (!k) return;
+    let c = map.get(k);
+    if (!c) { c = { key: k, ...o.cliente, ult: o.createdAt, n: 0, veiculos: new Map() }; map.set(k, c); }
+    c.n++;
+    ['email', 'doc'].forEach(f => { if (!c[f] && o.cliente[f]) c[f] = o.cliente[f]; });
+    const placa = (o.veiculo.placa || '').toUpperCase().trim(), vk = placa || norm(o.veiculo.modelo);
+    if (vk && !c.veiculos.has(vk)) c.veiculos.set(vk, { ...o.veiculo, placa });
   });
-  const lst = [...map.values()].sort((a, b) => b.ult.localeCompare(a.ult));
+  return [...map.values()];
+}
+function cliBusca(lst, q) {
+  q = norm(q); const qd = q.replace(/\D/g, '');
+  return lst.filter(c => !q || norm(c.nome).includes(q) || (qd.length >= 3 && String(c.telefone).replace(/\D/g, '').includes(qd)) ||
+    [...c.veiculos.values()].some(v => norm(v.placa).includes(q) || norm(v.modelo).includes(q)));
+}
+const avatar = (nome, s = 46) => `<div class="thumb avatar" style="width:${s}px;height:${s}px">${esc((nome || '?').trim().charAt(0).toUpperCase())}</div>`;
+
+async function vClientes() {
+  setTop('Clientes');
+  const lst = await clientesIndex();
   view.innerHTML = `
-    <label class="search">${ic('search', 18)}<input class="inp" id="q" placeholder="Buscar cliente ou placa..."></label>
+    <label class="search">${ic('search', 18)}<input class="inp" id="q" placeholder="Buscar cliente, telefone ou placa..."></label>
     <div class="list" id="lst"></div>`;
   const draw = () => {
-    const q = $('#q').value.trim().toLowerCase();
-    $('#lst').innerHTML = lst.filter(c => !q || (c.nome + ' ' + [...c.veic].join(' ') + c.tel).toLowerCase().includes(q)).map(c => `
-      <a class="item" href="#/ordens/${encodeURIComponent(c.nome)}">
-        <div class="thumb" style="border-radius:50%;width:46px;height:46px;font-weight:800;color:#fff;background:#2a2a30">${esc(c.nome.trim().charAt(0).toUpperCase())}</div>
-        <div class="info"><b>${esc(c.nome)}</b><small>${esc([...c.veic].join(', '))}</small><small>${esc(c.tel)} · ${c.n} OS · última ${fmtDate(c.ult)}</small></div>${ic('chev', 18)}</a>`).join('')
-      || '<div class="empty">Nenhum cliente ainda.</div>';
+    $('#lst').innerHTML = cliBusca(lst, $('#q').value).map(c => `
+      <div class="item" data-ver="${esc(c.nome)}">
+        ${avatar(c.nome)}
+        <div class="info"><b>${esc(c.nome)}</b><small>${esc([...c.veiculos.values()].map(veiTxt).join(', '))}</small><small>${esc(c.telefone)} · ${c.n} OS · última ${fmtDate(c.ult)}</small></div>
+        <button class="btn red sm" data-nova="${esc(c.key)}">${ic('plus', 16)} OS</button></div>`).join('')
+      || '<div class="empty">Nenhum cliente encontrado.</div>';
+  };
+  $('#lst').onclick = e => {
+    const nb = e.target.closest('[data-nova]');
+    if (nb) { state.preCli = nb.dataset.nova; state.draft = null; location.hash = '#/nova'; return; }
+    const it = e.target.closest('[data-ver]'); if (it) location.hash = '#/ordens/' + encodeURIComponent(it.dataset.ver);
   };
   $('#q').oninput = draw; draw();
 }
 
 /* ===================== WIZARD NOVA / EDITAR ===================== */
-function vNova() {
-  if (!state.draft || state.draft.numero) { state.draft = newOrder(); state.step = 0; }
+async function vNova() {
+  if (!state.draft || state.draft.numero) {
+    state.draft = newOrder(); state.step = 0; state.modoNovo = true;
+    state.cliSel = state.veiSel = null; state.ultKm = '';
+    if (state.preCli) {
+      const c = (await clientesIndex()).find(x => x.key === state.preCli);
+      if (c) aplicaCliente(state.draft, c);
+    }
+  }
+  state.preCli = null;
   wizard();
 }
 async function vEditar(id) {
   if (!state.draft || state.draft.id !== id) {
     const o = await DB.get(id); if (!o) return location.hash = '#/ordens';
-    state.draft = o; state.step = 0;
+    state.draft = o; state.step = 0; state.modoNovo = false; state.ultKm = '';
   }
   wizard();
 }
+function aplicaCliente(o, c) {
+  o.cliente = { nome: c.nome || '', telefone: c.telefone || '', email: c.email || '', doc: c.doc || '' };
+  state.cliSel = c.key; state.veiSel = null;
+  const vs = [...c.veiculos.values()];
+  if (vs.length === 1) aplicaVeiculo(o, vs[0]); else limpaVeiculo(o);
+}
+function aplicaVeiculo(o, v) {
+  o.veiculo = { modelo: v.modelo || '', placa: v.placa || '', ano: v.ano || '', cor: v.cor || '', km: '', combustivel: o.veiculo.combustivel };
+  state.veiSel = v.placa || v.modelo; state.ultKm = v.km || '';
+}
+function limpaVeiculo(o) {
+  o.veiculo = { modelo: '', placa: '', ano: '', cor: '', km: '', combustivel: o.veiculo.combustivel };
+  state.veiSel = ''; state.ultKm = '';
+}
 async function persist() {
   const o = state.draft;
-  if (!o.numero) { o.numero = cfg.prox++; saveCfg(); }
+  if (!o.numero) {
+    const maxN = (await DB.all()).reduce((m, x) => Math.max(m, x.numero || 0), 0);
+    o.numero = Math.max(cfg.prox, maxN + 1); cfg.prox = o.numero + 1; saveCfg();
+  }
+  o._dirty = true;
   o.veiculo.placa = (o.veiculo.placa || '').toUpperCase().trim();
   o.updatedAt = new Date().toISOString();
   await DB.put(o);
+  syncLater();
 }
 function validaDados() {
   const o = state.draft; let ok = true;
@@ -291,6 +353,7 @@ async function sairWizard() {
 /* --- passo 1: dados --- */
 function stDados(o) {
   return `
+  ${state.modoNovo ? `<div class="card cli-box" id="cliBox"><div class="empty sm">Carregando clientes...</div></div>` : ''}
   <h3 class="sec">Cliente</h3>
   <div class="card form">
     ${field('Nome do cliente *', 'cliente.nome', { req: true, ph: 'Ex: João da Silva' })}
@@ -306,7 +369,7 @@ function stDados(o) {
     <div class="grid2">
       ${field('Placa *', 'veiculo.placa', { req: true, up: true, ph: 'ABC1D23' })}
       ${field('Ano', 'veiculo.ano', { mode: 'numeric', ph: '2017' })}
-      ${field('Quilometragem', 'veiculo.km', { mode: 'numeric', ph: '78.250' })}
+      ${field('Quilometragem', 'veiculo.km', { mode: 'numeric', ph: state.ultKm ? 'Última: ' + state.ultKm : '78.250' })}
       ${field('Cor', 'veiculo.cor', { ph: 'Preto' })}
     </div>
     <div class="fld"><span>Nível de combustível</span><div class="seg">${FUEL.map(f => `<button type="button" data-fuel="${f}" class="${o.veiculo.combustivel === f ? 'on' : ''}">${f}</button>`).join('')}</div></div>
@@ -322,6 +385,43 @@ function stDados(o) {
 }
 function bDados(o) {
   $$('[data-fuel]').forEach(b => b.onclick = () => { o.veiculo.combustivel = b.dataset.fuel; $$('[data-fuel]').forEach(x => x.classList.toggle('on', x === b)); });
+  const box = $('#cliBox'); if (!box) return;
+  clientesIndex().then(lst => {
+    if (!box.isConnected) return;
+    const c = state.cliSel && lst.find(x => x.key === state.cliSel);
+    if (c) {
+      // cliente escolhido: mostra os veículos dele
+      const vs = [...c.veiculos.values()];
+      box.innerHTML = `
+        <div class="row">${avatar(c.nome, 42)}<div class="info" style="flex:1;min-width:0"><b>${esc(c.nome)}</b><small>${esc(c.telefone || 'sem telefone')} · ${c.n} OS anteriores</small></div>
+        <button type="button" class="btn ghost sm" id="cliTroca">Trocar</button></div>
+        <div class="cli-lbl">Veículos do cliente — selecione um:</div>
+        <div class="vchips">${vs.map(v => `<button type="button" data-vei="${esc(v.placa || v.modelo)}" class="${state.veiSel === (v.placa || v.modelo) ? 'on' : ''}">${ic('car', 16)} ${esc(veiTxt(v))}</button>`).join('')}
+        <button type="button" data-vei="" class="${state.veiSel === '' ? 'on' : ''}">${ic('plus', 16)} Outro veículo</button></div>`;
+      $('#cliTroca').onclick = () => { o.cliente = { nome: '', telefone: '', email: '', doc: '' }; limpaVeiculo(o); state.cliSel = state.veiSel = null; wizard(); $('#cliQ')?.focus(); };
+      $$('[data-vei]', box).forEach(b => b.onclick = () => {
+        const v = vs.find(x => (x.placa || x.modelo) === b.dataset.vei);
+        v ? aplicaVeiculo(o, v) : limpaVeiculo(o); wizard();
+        if (!v) $('[data-f="veiculo.modelo"]').focus();
+      });
+      return;
+    }
+    // sem cliente escolhido: campo de busca
+    box.innerHTML = `
+      <div class="cli-lbl" style="margin-top:0">${ic('users', 16)} Cliente já cadastrado?</div>
+      <label class="search" style="margin:0">${ic('search', 18)}<input class="inp" id="cliQ" autocomplete="off" placeholder="Buscar por nome, telefone ou placa"></label>
+      <div class="list" id="cliRes" style="margin-top:8px"></div>
+      <div class="cli-lbl" style="margin-bottom:0">${lst.length ? 'Ou preencha abaixo para cadastrar um <b>novo cliente</b>.' : 'Nenhum cliente cadastrado ainda — preencha abaixo para cadastrar.'}</div>`;
+    const draw = () => {
+      const q = $('#cliQ').value;
+      $('#cliRes').innerHTML = !q.trim() ? '' : cliBusca(lst, q).slice(0, 6).map(c => `
+        <button type="button" class="item cli-it" data-cli="${esc(c.key)}">${avatar(c.nome, 38)}
+        <div class="info"><b>${esc(c.nome)}</b><small>${esc([...c.veiculos.values()].map(veiTxt).join(', ') || c.telefone)}</small></div>${ic('chev', 18)}</button>`).join('')
+        || '<div class="empty sm" style="padding:8px">Nenhum cliente encontrado.</div>';
+    };
+    $('#cliQ').oninput = draw;
+    $('#cliRes').onclick = e => { const b = e.target.closest('[data-cli]'); if (!b) return; aplicaCliente(o, lst.find(x => x.key === b.dataset.cli)); wizard(); };
+  });
 }
 
 /* --- passo 2: checklist --- */
@@ -390,11 +490,11 @@ function bFotos(o) {
   const add = async e => {
     const files = [...e.target.files]; if (!files.length) return;
     toast(`Processando ${files.length} foto(s)...`);
-    for (const f of files) { try { o.fotos.push({ ...(await compress(f)), legenda: '' }); } catch (err) { toast('Falha ao ler uma imagem'); } }
+    for (const f of files) { try { o.fotos.push({ ...(await compress(f)), legenda: '', path: `${o.id}/${uid()}.jpg` }); } catch (err) { toast('Falha ao ler uma imagem'); } }
     await persist(); wizard();
   };
   $('#phCam').onchange = add; $('#phGal').onchange = add;
-  $$('[data-del]').forEach(b => b.onclick = async () => { if (!confirm('Remover esta foto?')) return; o.fotos.splice(+b.dataset.del, 1); await persist(); wizard(); });
+  $$('[data-del]').forEach(b => b.onclick = async () => { if (!confirm('Remover esta foto?')) return; const [rm] = o.fotos.splice(+b.dataset.del, 1); Cloud.removePhoto(rm?.path); await persist(); wizard(); });
   $$('[data-leg]').forEach(i => i.oninput = () => o.fotos[+i.dataset.leg].legenda = i.value);
 }
 
@@ -556,7 +656,7 @@ function foneWa(t) { let d = String(t || '').replace(/\D/g, ''); if (d.length ==
 async function acao(a, o) {
   if (a === 'del') {
     if (!confirm(`Excluir a OS ${numFmt(o.numero)}? Esta ação não pode ser desfeita.`)) return;
-    await DB.del(o.id); toast('OS excluída'); location.hash = '#/ordens'; return;
+    await DB.del(o.id); Cloud.queueDelete(o); toast('OS excluída'); location.hash = '#/ordens'; return;
   }
   let blob;
   try { blob = getPdf(o); } catch (e) { console.error(e); toast('Erro ao gerar o PDF: ' + e.message, 4000); return; }
@@ -600,18 +700,38 @@ function vConfig() {
     ${f('Responsável padrão', 'responsavel')}
     <label class="fld"><span>Próximo número de OS</span><input type="number" min="1" data-c="prox" value="${cfg.prox}"></label>
   </div>
+  ${Cloud.on ? `
+  <h3 class="sec">Nuvem</h3>
+  <div class="card form">
+    <div class="row">${ic('cloud', 22)}<div style="flex:1;min-width:0"><b>Conectado</b><div class="note" style="margin:2px 0 0;overflow-wrap:anywhere">${esc(Cloud.user?.email || '')}</div></div></div>
+    <div class="note" id="syncInfo" style="margin:0"></div>
+    <button class="btn ghost" id="syncNow">${ic('cloud', 18)} Sincronizar agora</button>
+    <button class="btn danger" id="sair">Sair desta conta</button>
+    <p class="note" style="margin:0">Os dados ficam salvos na nuvem e também neste aparelho, então o sistema funciona mesmo sem internet e envia tudo quando a conexão voltar.</p>
+  </div>` : `
   <h3 class="sec">Dados</h3>
   <div class="card form">
     <button class="btn ghost" id="seedB">Carregar ordens de exemplo</button>
     <button class="btn danger" id="clr">${ic('trash', 18)} Apagar todas as ordens</button>
     <p class="note" style="margin:0">Versão demo: os dados ficam salvos somente neste aparelho/navegador.</p>
-  </div>`;
+  </div>`}`;
+  if (Cloud.on) {
+    const info = () => { const el = $('#syncInfo'); if (el) el.textContent = syncTxt(); };
+    info(); Cloud.onStatus(info);
+    $('#syncNow').onclick = async () => { const n = await Cloud.sync(); toast(Cloud.status.st === 'erro' ? 'Erro: ' + Cloud.status.msg : 'Sincronizado'); if (n) render(); };
+    $('#sair').onclick = async () => {
+      if (!confirm('Sair da conta? Os dados deste aparelho serão apagados (continuam salvos na nuvem).')) return;
+      if ((await DB.all()).some(o => o._dirty) && !confirm('Existem OS ainda NÃO enviadas para a nuvem. Elas serão perdidas. Sair mesmo assim?')) return;
+      await Cloud.logout(); await DB.clear(); location.hash = '#/inicio'; location.reload();
+    };
+  }
   $$('[data-c]').forEach(i => i.oninput = () => { cfg[i.dataset.c] = i.dataset.c === 'prox' ? Math.max(1, parseInt(i.value) || 1) : i.value; saveCfg(); $('#brand').innerHTML = brandHTML(); });
   $('#logo').onchange = async e => {
     const fl = e.target.files[0]; if (!fl) return;
     const r = await compress(fl, 360, 0.85); Object.assign(cfg, { logo: r.data, logoW: r.w, logoH: r.h }); saveCfg(); vConfig(); toast('Logo atualizada');
   };
   if ($('#rmLogo')) $('#rmLogo').onclick = () => { Object.assign(cfg, { logo: '', logoW: 0, logoH: 0 }); saveCfg(); vConfig(); };
+  if (Cloud.on) return;
   $('#seedB').onclick = async () => { await seed(true); toast('Exemplos carregados'); };
   $('#clr').onclick = async () => { if (!confirm('Apagar TODAS as ordens de serviço deste aparelho? Não pode ser desfeito.')) return; await DB.clear(); cfg.prox = 1; saveCfg(); vConfig(); toast('Ordens apagadas'); };
 }
@@ -640,9 +760,59 @@ async function seed(force) {
   if (location.hash.startsWith('#/inicio') || !location.hash) render();
 }
 
+/* ===================== nuvem: login + status ===================== */
+function syncTxt() {
+  const s = Cloud.status, at = s.at ? new Date(s.at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+  return { sync: 'Sincronizando...', ok: `Sincronizado${at ? ' às ' + at : ''}`, offline: 'Sem internet — será enviado quando voltar', erro: 'Erro ao sincronizar: ' + s.msg, idle: 'Aguardando sincronização' }[s.st] || '';
+}
+function drawSyncDot() {
+  const el = $('#syncDot'); if (!el) return;
+  el.hidden = !Cloud.on || !Cloud.user;
+  el.className = 'icon-btn sync-dot ' + Cloud.status.st; el.title = syncTxt();
+}
+function vLogin() {
+  document.body.className = 'login';
+  view.innerHTML = `
+  <div class="login-box">
+    <div class="logo" style="font-size:34px;text-align:center">${brandHTML().replace(/^<div class="logo">|<\/div>$/g, '')}</div>
+    <p class="hint" style="text-align:center;margin:18px 0 22px">Entre com a conta da oficina para acessar as ordens de serviço.</p>
+    <form id="lf" class="card form">
+      <label class="fld"><span>E-mail</span><input type="email" id="le" autocomplete="username" required></label>
+      <label class="fld"><span>Senha</span><input type="password" id="lp" autocomplete="current-password" required></label>
+      <div id="lerr" class="note" style="color:#ff6b70;margin:0"></div>
+      <button class="btn red" id="lb" style="width:100%">Entrar ${ic('chev', 18)}</button>
+    </form>
+  </div>`;
+  $('#lf').onsubmit = async e => {
+    e.preventDefault(); const b = $('#lb'); b.disabled = true; $('#lerr').textContent = '';
+    try {
+      await Cloud.login($('#le').value.trim(), $('#lp').value);
+      document.body.className = ''; view.innerHTML = '<div class="empty">Carregando dados da nuvem...</div>';
+      await DB.clear(); // descarta exemplos/dados locais antigos: a nuvem passa a ser a fonte
+      try { localStorage.setItem('os_seeded', '1'); } catch (e2) { }
+      await Cloud.sync(); drawSyncDot(); render();
+    } catch (err) { $('#lerr').textContent = err.message; b.disabled = false; }
+  };
+}
+
 /* ===================== start ===================== */
 (async () => {
   if (!location.hash) history.replaceState(null, '', '#/inicio');
-  await seed(false);
-  render();
+  $('.top-sp').outerHTML = `<button id="syncDot" class="icon-btn sync-dot" hidden aria-label="Sincronização">${ic('cloud', 22)}</button>`;
+  if (!Cloud.on) { await seed(false); return render(); }
+  Cloud.ctx = {
+    DB, cfg: () => cfg,
+    saveLocalCfg: d => { Object.assign(cfg, d); saveCfg(true); $('#brand').innerHTML = brandHTML(); },
+    onDraftPaths: (id, paths) => { if (state.draft?.id === id) state.draft.fotos.forEach((f, i) => { if (!f.path && paths[i]) f.path = paths[i]; }); },
+  };
+  Cloud.onStatus(drawSyncDot);
+  $('#syncDot').onclick = () => { toast(syncTxt()); Cloud.sync().then(afterSync); };
+  let user = null;
+  try { user = await Cloud.session(); } catch (e) { console.error(e); }
+  if (!user) return vLogin();
+  drawSyncDot(); render();
+  Cloud.sync().then(afterSync);
+  setInterval(() => Cloud.sync().then(afterSync), 60000);
+  window.addEventListener('online', () => Cloud.sync().then(afterSync));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) Cloud.sync().then(afterSync); });
 })();
