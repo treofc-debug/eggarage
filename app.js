@@ -770,29 +770,59 @@ function drawSyncDot() {
   el.hidden = !Cloud.on || !Cloud.user;
   el.className = 'icon-btn sync-dot ' + Cloud.status.st; el.title = syncTxt();
 }
-function vLogin() {
+const GOOGLE_SVG = `<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.9z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.6-.4-3.9z"/></svg>`;
+// primeiro acesso após login: descarta exemplos/dados locais antigos (a nuvem passa a ser a fonte)
+async function entrouNaNuvem() {
+  document.body.className = ''; view.innerHTML = '<div class="empty">Carregando dados da nuvem...</div>';
+  // só no PRIMEIRO login deste aparelho apaga os exemplos; nos próximos, nada local é apagado
+  // (pode haver OS/fotos ainda não enviadas). Depois disso, sempre baixa tudo da nuvem de novo.
+  let first = true; try { first = !localStorage.getItem('os_cloud_init'); } catch (e) { }
+  if (first) await DB.clear();
+  try {
+    localStorage.setItem('os_cloud_init', '1'); localStorage.setItem('os_seeded', '1');
+    localStorage.removeItem('os_login_new'); localStorage.removeItem('os_sync_last');
+  } catch (e) { }
+  await Cloud.sync(); drawSyncDot(); render(); startSync();
+}
+function vLogin(msg = '') {
   document.body.className = 'login';
   view.innerHTML = `
   <div class="login-box">
     <div class="logo" style="font-size:34px;text-align:center">${brandHTML().replace(/^<div class="logo">|<\/div>$/g, '')}</div>
     <p class="hint" style="text-align:center;margin:18px 0 22px">Entre com a conta da oficina para acessar as ordens de serviço.</p>
-    <form id="lf" class="card form">
-      <label class="fld"><span>E-mail</span><input type="email" id="le" autocomplete="username" required></label>
-      <label class="fld"><span>Senha</span><input type="password" id="lp" autocomplete="current-password" required></label>
-      <div id="lerr" class="note" style="color:#ff6b70;margin:0"></div>
-      <button class="btn red" id="lb" style="width:100%">Entrar ${ic('chev', 18)}</button>
-    </form>
+    <div class="card form">
+      <button type="button" class="btn google" id="lg">${GOOGLE_SVG} Entrar com Google</button>
+      <div class="or"><span>ou com e-mail</span></div>
+      <form id="lf" class="form" style="padding:0">
+        <label class="fld"><span>E-mail</span><input type="email" id="le" autocomplete="username" required></label>
+        <label class="fld"><span>Senha</span><input type="password" id="lp" autocomplete="current-password" required></label>
+        <label class="keep"><input type="checkbox" id="lk" ${Cloud.keep() ? 'checked' : ''}> Permanecer logado</label>
+        <div id="lerr" class="note" style="color:#ff6b70;margin:0">${esc(msg)}</div>
+        <button class="btn red" id="lb" style="width:100%">Entrar ${ic('chev', 18)}</button>
+      </form>
+    </div>
   </div>`;
+  $('#lg').onclick = async () => {
+    const b = $('#lg'); b.disabled = true; $('#lerr').textContent = '';
+    try { localStorage.setItem('os_login_new', '1'); } catch (e) { }
+    try { await Cloud.loginGoogle($('#lk').checked); } // redireciona para o Google
+    catch (err) { try { localStorage.removeItem('os_login_new'); } catch (e) { } $('#lerr').textContent = err.message; b.disabled = false; }
+  };
   $('#lf').onsubmit = async e => {
     e.preventDefault(); const b = $('#lb'); b.disabled = true; $('#lerr').textContent = '';
     try {
-      await Cloud.login($('#le').value.trim(), $('#lp').value);
-      document.body.className = ''; view.innerHTML = '<div class="empty">Carregando dados da nuvem...</div>';
-      await DB.clear(); // descarta exemplos/dados locais antigos: a nuvem passa a ser a fonte
-      try { localStorage.setItem('os_seeded', '1'); } catch (e2) { }
-      await Cloud.sync(); drawSyncDot(); render();
+      await Cloud.login($('#le').value.trim(), $('#lp').value, $('#lk').checked);
+      await entrouNaNuvem();
     } catch (err) { $('#lerr').textContent = err.message; b.disabled = false; }
   };
+}
+let syncStarted = false;
+function startSync() {
+  if (syncStarted) return; syncStarted = true;
+  Cloud.sync().then(afterSync);
+  setInterval(() => Cloud.sync().then(afterSync), 60000);
+  window.addEventListener('online', () => Cloud.sync().then(afterSync));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) Cloud.sync().then(afterSync); });
 }
 
 /* ===================== start ===================== */
@@ -807,12 +837,10 @@ function vLogin() {
   };
   Cloud.onStatus(drawSyncDot);
   $('#syncDot').onclick = () => { toast(syncTxt()); Cloud.sync().then(afterSync); };
-  let user = null;
-  try { user = await Cloud.session(); } catch (e) { console.error(e); }
-  if (!user) return vLogin();
-  drawSyncDot(); render();
-  Cloud.sync().then(afterSync);
-  setInterval(() => Cloud.sync().then(afterSync), 60000);
-  window.addEventListener('online', () => Cloud.sync().then(afterSync));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) Cloud.sync().then(afterSync); });
+  let user = null, msg = '';
+  try { user = await Cloud.session(); } catch (e) { console.error(e); msg = e.message; }
+  if (!user) return vLogin(msg);
+  let novo = false; try { novo = localStorage.getItem('os_login_new') === '1'; } catch (e) { }
+  if (novo) return entrouNaNuvem(); // voltou do Google
+  drawSyncDot(); render(); startSync();
 })();
