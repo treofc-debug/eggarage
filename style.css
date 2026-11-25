@@ -217,6 +217,42 @@ canvas.sig{display:block;width:100%;height:160px;background:#fff;border-radius:1
 .pchip.at{color:var(--yellow);border-color:rgba(245,165,36,.4)}.pchip.rp{color:var(--red2);border-color:rgba(229,22,29,.45)}
 .hthumbs{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px}
 .hthumbs img{width:64px;height:48px;object-fit:cover;border-radius:8px;flex:none;cursor:zoom-in}
+.hist-box{display:grid;gap:12px;color:var(--text)}
+.hist-box-t{display:flex;gap:12px;align-items:flex-start}
+.hist-box-t .ic{color:var(--yellow);flex:none;margin-top:2px}
+.hist-box-t small{display:block;color:var(--mut);font-size:13px;margin-top:2px}
+.hist-box-t small.rep{color:var(--yellow)}
+.hist-box .btn{width:100%}
+/* comparação lado a lado */
+.hist-veh{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.hist-veh small{flex-basis:100%;color:var(--mut);font-size:13px}
+.cmp-sel{overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px}
+.cmp-sel button{white-space:nowrap;flex:none}
+.cmp{padding:4px 12px;margin-bottom:4px}
+.cmp-r{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr) minmax(0,1fr);gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+.cmp-r:last-child{border-bottom:0}
+.cmp-r.cmp-2{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;gap:12px}
+.cmp-head b{display:block;font-size:14px}.cmp-head small{color:var(--mut);font-size:11.5px}
+.cmp-l{color:var(--mut);font-size:12.5px;min-width:0}
+.cmp-r.ck .cmp-l{color:var(--text)}
+.cmp-note{font-size:12px;color:var(--mut);padding:0 0 8px;margin-top:-4px;border-bottom:1px solid var(--line);text-align:right}
+.cmp-cat{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--mut);padding:12px 0 4px}
+.cmp-r.melhor{background:linear-gradient(90deg,rgba(34,197,94,.08),transparent)}
+.cmp-r.pior{background:linear-gradient(90deg,rgba(229,22,29,.1),transparent)}
+.cmp-r.rep{background:linear-gradient(90deg,rgba(245,165,36,.08),transparent)}
+.tg{display:block;font-style:normal;font-size:11px;font-weight:700;margin-top:2px}
+.cmp-sum{display:flex;flex-wrap:wrap;gap:6px 14px;margin:-4px 2px 10px;font-size:13px}
+.cmp-sum .tg{display:inline;font-size:13px;margin:0}
+.tg.melhor{color:var(--green)}.tg.pior{color:var(--red2)}.tg.rep{color:var(--yellow)}
+.stp-ok,.stp-at,.stp-rp,.stp-nv{display:inline-block;font-size:11.5px;font-weight:700;border-radius:20px;padding:2px 8px}
+.stp-ok{color:var(--green);background:rgba(34,197,94,.12)}.stp-at{color:var(--yellow);background:rgba(245,165,36,.12)}
+.stp-rp{color:var(--red2);background:rgba(229,22,29,.14)}.stp-nv{color:var(--mut)}
+.cmp-tg{display:flex;align-items:center;gap:6px;text-transform:none;letter-spacing:0;font-weight:600;font-size:12.5px;cursor:pointer}
+.cmp-tg input{accent-color:var(--red);width:16px;height:16px}
+.cmp-sv{font-size:13px;padding:3px 0}.cmp-sv small{display:block;color:var(--mut);font-size:11.5px}
+.cmp-ph{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:5px}
+.cmp-ph img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:6px;cursor:zoom-in;display:block}
+.mut{color:var(--mut)}
 /* reaproveitar fotos */
 .reuso{display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:var(--card);border:1px dashed var(--line);border-radius:var(--r);padding:12px;margin-bottom:14px;color:var(--text);cursor:pointer}
 .reuso .ic{color:var(--yellow);flex:none}.reuso div{flex:1;min-width:0}.reuso small{display:block;color:var(--mut);font-size:12.5px}

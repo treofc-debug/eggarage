@@ -179,6 +179,7 @@ async function render() {
       case 'editar': return await vEditar(arg);
       case 'ordens': return await vOrdens(decodeURIComponent(arg || ''));
       case 'os': return await vOS(arg);
+      case 'hist': return await vHist(arg);
       case 'clientes': return await vClientes();
       case 'config': return vConfig();
       default: location.hash = '#/inicio';
@@ -785,7 +786,7 @@ async function vOS(id) {
     <dt style="font-size:16px;color:var(--text)">Total</dt><dd style="font-size:18px;color:var(--red2)">${brl(t.total)}</dd>
   </dl></div>
   ${o.fotos.length ? `<h3 class="sec">Fotos (${o.fotos.length})</h3><div class="thumbs">${o.fotos.map(f => `<img src="${f.data}" alt="">`).join('')}</div>` : ''}
-  ${hist.length ? histHTML(o, hist, histAll.length) : ''}
+  ${hist.length ? histResumoHTML(o, histAll) : ''}
   <h3 class="sec">Ações</h3>
   <div class="actions">
     <a class="btn ghost" href="#/editar/${o.id}">${ic('edit', 18)} ${o.status === 'concluida' ? 'Editar' : 'Continuar'}</a>
@@ -796,7 +797,91 @@ async function vOS(id) {
   $$('.thumbs img').forEach((im, i) => im.onclick = () => verFotos(o.fotos, i));
   $('.os-head .thumb')?.addEventListener('click', () => verFotos(o.fotos, 0));
   prepHist(o, hist);
-  $$('[data-hf]').forEach(im => im.onclick = () => { const h = hist.find(x => x.id === im.dataset.hf); verFotos(h.fotos.filter(f => f.data), +im.dataset.i); });
+}
+
+// cartão compacto do histórico na tela da OS (abre a tela de comparação)
+function histResumoHTML(o, hist) {
+  const ant = hist[0], km = kmNum(o.veiculo.km) - kmNum(ant.veiculo.km);
+  const pAnt = new Set(problemas(ant).map(p => p.k)), repet = problemas(o).filter(p => pAnt.has(p.k));
+  return `
+  <h3 class="sec">Histórico do veículo</h3>
+  <a class="card hist-box" href="#/hist/${o.id}">
+    <div class="hist-box-t">${ic('clock', 22)}<div><b>${hist.length} visita${hist.length > 1 ? 's' : ''} anterior${hist.length > 1 ? 'es' : ''}</b>
+      <small>Última: OS ${numFmt(ant.numero)}, há ${diasTxt(ant.createdAt, o.createdAt)}${kmNum(o.veiculo.km) && kmNum(ant.veiculo.km) && km >= 0 ? ` · +${km.toLocaleString('pt-BR')} km` : ''}</small>
+      ${repet.length ? `<small class="rep">${repet.length} problema(s) se repetem</small>` : ''}</div></div>
+    <span class="btn ghost sm">Ver histórico e comparar ${ic('chev', 16)}</span>
+  </a>`;
+}
+const bindHistFotos = hist => $$('[data-hf]').forEach(im => im.onclick = () => { const h = hist.find(x => x.id === im.dataset.hf); verFotos(h.fotos.filter(f => f.data), +im.dataset.i); });
+
+/* ===================== HISTÓRICO / COMPARAÇÃO LADO A LADO ===================== */
+const ST_RANK = { ok: 1, at: 2, rp: 3 };
+const stPill = st => st ? `<span class="stp-${st}">${st === 'ok' ? 'OK' : st === 'at' ? 'Atenção' : 'Reprov.'}</span>` : '<span class="stp-nv">—</span>';
+async function vHist(id) {
+  const o = await DB.get(id); if (!o) return location.hash = '#/ordens';
+  const all = await DB.all(), histAll = historico(o, all), lim = num(cfg.histMax), hist = lim ? histAll.slice(0, lim) : histAll;
+  if (!hist.length) return location.hash = '#/os/' + id;
+  setTop('Histórico · ' + (o.veiculo.placa || '').toUpperCase(), '#/os/' + id);
+  if (!state.cmp || state.cmp.id !== id || !hist.some(h => h.id === state.cmp.with)) state.cmp = { id, with: hist[0].id, diff: false };
+  view.innerHTML = `
+    <div class="card hist-veh"><b>${esc(o.veiculo.modelo || 'Veículo')}</b> <span class="plate">${esc((o.veiculo.placa || '').toUpperCase())}</span>
+      <small>${esc(o.cliente.nome)} · ${histAll.length + 1} visitas no total</small></div>
+    <h3 class="sec">Comparar OS ${numFmt(o.numero)} com</h3>
+    <div class="filters cmp-sel">${hist.map(h => `<button data-cw="${h.id}">OS ${numFmt(h.numero)} · ${fmtDate(h.createdAt)}</button>`).join('')}</div>
+    <div id="cmp"></div>
+    ${histHTML(o, hist, histAll.length)}`;
+  const draw = () => {
+    const h = hist.find(x => x.id === state.cmp.with);
+    $$('[data-cw]').forEach(b => b.classList.toggle('on', b.dataset.cw === h.id));
+    $('#cmp').innerHTML = cmpHTML(o, h, state.cmp.diff);
+    $('#cmpDiff').onchange = e => { state.cmp.diff = e.target.checked; draw(); };
+    $$('#cmp [data-cf]').forEach(im => im.onclick = () => { const x = im.dataset.cf === 'a' ? o : h; verFotos(x.fotos.filter(f => f.data), +im.dataset.i); });
+  };
+  $$('[data-cw]').forEach(b => b.onclick = () => { state.cmp.with = b.dataset.cw; draw(); });
+  bindHistFotos(hist);
+  draw();
+}
+function cmpHTML(a, b, soDiff) {
+  // a = OS atual (esquerda), b = visita anterior (direita)
+  const ra = resultado(a), rb = resultado(b), ta = totals(a), tb = totals(b);
+  const km = kmNum(a.veiculo.km) - kmNum(b.veiculo.km);
+  const row = (label, va, vb, cls = '') => `<div class="cmp-r ${cls}"><div class="cmp-l">${label}</div><div>${va}</div><div>${vb}</div></div>`;
+  let ckRows = '', nMelhor = 0, nPior = 0, nRep = 0;
+  CHECKLIST.forEach(cat => {
+    let rows = '';
+    cat.itens.forEach((it, i) => {
+      const k = ckKey(cat, i), sa = a.checklist?.[k], sb = b.checklist?.[k];
+      if (!sa && !sb) return;
+      let tag = '', cls = '';
+      if (sa && sb && ST_RANK[sa] < ST_RANK[sb]) { tag = '<i class="tg melhor">▲ melhorou</i>'; cls = 'melhor'; nMelhor++; }
+      else if (sa && sb && ST_RANK[sa] > ST_RANK[sb]) { tag = '<i class="tg pior">▼ piorou</i>'; cls = 'pior'; nPior++; }
+      else if (sa && sa === sb && sa !== 'ok') { tag = '<i class="tg rep">● repete</i>'; cls = 'rep'; nRep++; }
+      if (soDiff && !cls) return;
+      rows += `<div class="cmp-r ck ${cls}"><div class="cmp-l">${esc(it)}${tag}</div><div>${stPill(sa)}</div><div>${stPill(sb)}</div></div>`;
+    });
+    if (rows) ckRows += `<div class="cmp-cat">${esc(cat.nome)}</div>${rows}`;
+  });
+  const servs = o => o.servicos.length ? o.servicos.map(s => `<div class="cmp-sv">${esc(s.desc || (s.tipo === 'peca' ? 'Peça' : 'Serviço'))}<small>${brl(num(s.qtd) * num(s.valor))}</small></div>`).join('') : '<span class="mut">—</span>';
+  const fotos = (o, side) => { const fs = o.fotos.filter(f => f.data); return fs.length ? `<div class="cmp-ph">${fs.map((f, i) => `<img src="${f.data}" data-cf="${side}" data-i="${i}" alt="">`).join('')}</div>` : '<span class="mut">Sem fotos</span>'; };
+  return `
+  <div class="card cmp">
+    <div class="cmp-r cmp-head"><div></div><div><b>OS ${numFmt(a.numero)}</b><small>Atual · ${fmtDate(a.createdAt)}</small></div><div><b>OS ${numFmt(b.numero)}</b><small>Anterior · ${fmtDate(b.createdAt)}</small></div></div>
+    ${row('KM', a.veiculo.km ? esc(a.veiculo.km) : '—', b.veiculo.km ? esc(b.veiculo.km) : '—')}
+    ${kmNum(a.veiculo.km) && kmNum(b.veiculo.km) ? `<div class="cmp-note">${km >= 0 ? `+${km.toLocaleString('pt-BR')} km` : `${km.toLocaleString('pt-BR')} km (KM menor que o anterior)`} em ${diasTxt(b.createdAt, a.createdAt)}</div>` : ''}
+    ${row('Resultado', `<span class="res ${ra.cls}">${ra.txt}</span>`, `<span class="res ${rb.cls}">${rb.txt}</span>`)}
+    ${row('Problemas', `${problemas(a).length}`, `${problemas(b).length}`)}
+    ${row('Total', `<b>${brl(ta.total)}</b>`, `<b>${brl(tb.total)}</b>`)}
+    ${a.reclamacao || b.reclamacao ? row('Reclamação', esc(a.reclamacao || '—'), esc(b.reclamacao || '—')) : ''}
+  </div>
+  <h3 class="sec">Checklist <label class="cmp-tg"><input type="checkbox" id="cmpDiff" ${soDiff ? 'checked' : ''}> Só o que mudou</label></h3>
+  <div class="cmp-sum">${nMelhor ? `<span class="tg melhor">▲ ${nMelhor} melhorou</span>` : ''}${nPior ? `<span class="tg pior">▼ ${nPior} piorou</span>` : ''}${nRep ? `<span class="tg rep">● ${nRep} se repete</span>` : ''}${!nMelhor && !nPior && !nRep ? '<span class="mut">Nenhuma diferença relevante</span>' : ''}</div>
+  <div class="card cmp">${ckRows || '<div class="empty sm">Nada para mostrar</div>'}</div>
+  <h3 class="sec">Serviços e peças</h3>
+  <div class="card cmp"><div class="cmp-r cmp-2"><div>${servs(a)}</div><div>${servs(b)}</div></div></div>
+  <h3 class="sec">Fotos</h3>
+  <div class="card cmp"><div class="cmp-r cmp-2 cmp-head"><div><b>OS ${numFmt(a.numero)}</b></div><div><b>OS ${numFmt(b.numero)}</b></div></div>
+    <div class="cmp-r cmp-2"><div>${fotos(a, 'a')}</div><div>${fotos(b, 'b')}</div></div></div>
+  <h3 class="sec">Todas as visitas</h3>`;
 }
 
 // seção "Histórico do veículo": comparação com a visita anterior + um cartão por OS antiga
@@ -811,8 +896,7 @@ function histHTML(o, hist, total = hist.length) {
   ].filter(Boolean);
   const chips = ps => ps.map(p => `<span class="pchip ${p.st}">${esc(p.it)}</span>`).join('');
   return `
-  <h3 class="sec">Histórico do veículo (${hist.length} visita${hist.length > 1 ? 's' : ''} anterior${hist.length > 1 ? 'es' : ''})</h3>
-  <div class="card hist-cmp">${comp.map(c => `<div>${c}</div>`).join('')}${total > hist.length ? `<div>Mostrando as ${hist.length} visitas mais recentes de ${total} (ajuste em Configurações).</div>` : ''}</div>
+  ${total > hist.length ? `<p class="note" style="margin:0 0 10px">Mostrando as ${hist.length} visitas mais recentes de ${total} (ajuste em Configurações).</p>` : ''}
   ${hist.map(h => {
     const ps = problemas(h), r = resultado(h), fs = h.fotos.filter(f => f.data);
     return `
