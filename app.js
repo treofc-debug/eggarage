@@ -63,7 +63,7 @@ const SUGEST = ['Troca de óleo', 'Filtro de óleo', 'Filtro de ar', 'Pastilhas 
 
 /* ===================== configurações (localStorage) ===================== */
 const CFG_KEY = 'os_cfg';
-const CFG_DEF = { nome: 'EG Garage', sub: 'Oficina Mecânica', cnpj: '', telefone: '', email: '', endereco: '', responsavel: 'Enzo Giovanne', prox: 1, logo: '', logoW: 0, logoH: 0 };
+const CFG_DEF = { nome: 'EG Garage', sub: 'Oficina Mecânica', cnpj: '', telefone: '', email: '', endereco: '', responsavel: 'Enzo Giovanne', prox: 1, histMax: '0', logo: '', logoW: 0, logoH: 0 };
 let cfg = { ...CFG_DEF };
 try { Object.assign(cfg, JSON.parse(localStorage.getItem(CFG_KEY) || '{}')); } catch (e) { }
 function saveCfg(fromCloud) {
@@ -133,8 +133,30 @@ function resultado(o) {
 }
 const statusChip = o => o.status === 'concluida' ? '<span class="chip concluida">Concluída</span>' : '<span class="chip andamento">Em andamento</span>';
 
+/* ===================== histórico por placa ===================== */
+const placaKey = o => String(o?.veiculo?.placa || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+const kmNum = v => num(String(v ?? '').replace(/\./g, '').replace(/\s*km/i, ''));
+// agrupa as OS (já ordenadas da mais nova p/ mais antiga) por placa: g.o = a mais recente, g.grupo = todas
+function porPlaca(all) {
+  const map = new Map(), out = [];
+  all.forEach(o => {
+    const k = placaKey(o), g = k && map.get(k);
+    if (g) { g.grupo.push(o); return; }
+    const ng = { o, grupo: [o] }; out.push(ng); if (k) map.set(k, ng);
+  });
+  return out;
+}
+// OS anteriores do mesmo veículo (mais nova primeiro)
+const historico = (o, all) => { const k = placaKey(o); return k ? all.filter(x => x.id !== o.id && placaKey(x) === k && x.createdAt < o.createdAt) : []; };
+// itens do checklist com atenção / reprovado
+function problemas(o) {
+  const out = [];
+  CHECKLIST.forEach(cat => cat.itens.forEach((it, i) => { const st = o.checklist?.[ckKey(cat, i)]; if (st === 'at' || st === 'rp') out.push({ k: ckKey(cat, i), it, st }); }));
+  return out;
+}
+
 /* ===================== estado / roteamento ===================== */
-const state = { draft: null, step: 0, pdf: {}, justDone: null, filtro: 'todas' };
+const state = { draft: null, step: 0, pdf: {}, justDone: null, filtro: 'todas', hprep: {}, hprepV: {} };
 const view = $('#view');
 $('#brand').innerHTML = brandHTML();
 function brandHTML() { const [a, ...b] = (cfg.nome || 'Oficina').split(' '); return `<div class="logo"><b>${esc(a)}</b>${b.length ? ' ' + esc(b.join(' ')) : ''}<small>${esc(cfg.sub)}</small></div>`; }
@@ -166,11 +188,13 @@ async function render() {
 window.addEventListener('hashchange', render);
 
 function itemHTML(o) {
-  const f = o.fotos[0];
+  let visitas = 1;
+  if (o?.o) { visitas = o.grupo.length; o = o.o; } // aceita um grupo de porPlaca()
+  const f = o.fotos.find(x => x.data);
   return `<a class="item" href="#/os/${o.id}">
     <div class="thumb" ${f ? `style="background-image:url(${f.data})"` : ''}>${f ? '' : ic('car', 24)}</div>
     <div class="info"><b>${esc(o.veiculo.modelo || 'Veículo')} · ${esc((o.veiculo.placa || '').toUpperCase())}</b>
-    <small>OS ${numFmt(o.numero)} · ${esc(o.cliente.nome)}</small><small>${fmtDateTime(o.createdAt)}</small></div>
+    <small>OS ${numFmt(o.numero)} · ${esc(o.cliente.nome)}</small><small>${fmtDateTime(o.createdAt)}${visitas > 1 ? ` · <span class="visitas">${visitas} visitas</span>` : ''}</small></div>
     ${statusChip(o)}</a>`;
 }
 
@@ -183,6 +207,7 @@ async function vHome() {
   const conc = all.filter(o => o.status === 'concluida');
   const mes = conc.filter(o => { const d = new Date(o.concluidaEm || o.createdAt); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); })
     .reduce((a, o) => a + totals(o).total, 0);
+  const grupos = porPlaca(all), gAnd = grupos.filter(g => g.o.status !== 'concluida');
   const h = now.getHours(), saud = h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite';
   view.innerHTML = `
     <div class="hello"><h2>${saud}, ${esc((cfg.responsavel || '').split(' ')[0] || 'equipe')}! 👋</h2><p>Controle total da sua oficina.</p></div>
@@ -193,24 +218,25 @@ async function vHome() {
       <div class="stat s4">${ic('money', 24)}<small>Faturado no mês</small><b style="font-size:18px;margin-top:6px">${brl(mes)}</b></div>
     </div>
     <a class="btn red cta" href="#/nova">${ic('plus', 20)} Nova Ordem de Serviço</a>
-    ${and.length ? `<h3 class="sec">Em andamento</h3><div class="list">${and.slice(0, 4).map(itemHTML).join('')}</div>` : ''}
+    ${gAnd.length ? `<h3 class="sec">Em andamento</h3><div class="list">${gAnd.slice(0, 4).map(g => itemHTML(g)).join('')}</div>` : ''}
     <h3 class="sec">Últimas ordens <a href="#/ordens">Ver todas ${''}</a></h3>
-    <div class="list">${all.slice(0, 6).map(itemHTML).join('') || '<div class="empty">Nenhuma OS ainda. Toque em “Nova Ordem de Serviço”.</div>'}</div>`;
+    <div class="list">${grupos.slice(0, 6).map(g => itemHTML(g)).join('') || '<div class="empty">Nenhuma OS ainda. Toque em “Nova Ordem de Serviço”.</div>'}</div>`;
 }
 
 /* ===================== LISTA DE ORDENS ===================== */
 async function vOrdens(q0) {
   setTop('Ordens de Serviço');
-  const all = await DB.all();
+  const grupos = porPlaca(await DB.all());
   view.innerHTML = `
     <label class="search">${ic('search', 18)}<input class="inp" id="q" placeholder="Buscar cliente, placa ou veículo..." value="${esc(q0)}"></label>
     <div class="filters">${[['todas', 'Todas'], ['andamento', 'Em andamento'], ['concluida', 'Concluídas']].map(([k, t]) => `<button data-fl="${k}" class="${state.filtro === k ? 'on' : ''}">${t}</button>`).join('')}</div>
     <div class="list" id="lst"></div>`;
   const draw = () => {
     const q = $('#q').value.trim().toLowerCase();
-    const l = all.filter(o => (state.filtro === 'todas' || o.status === state.filtro) &&
-      (!q || [o.cliente.nome, o.veiculo.placa, o.veiculo.modelo, o.cliente.telefone, numFmt(o.numero)].join(' ').toLowerCase().includes(q)));
-    $('#lst').innerHTML = l.map(itemHTML).join('') || '<div class="empty">Nenhuma ordem encontrada.</div>';
+    // mostra só a OS mais recente de cada veículo; a busca considera também as antigas
+    const l = grupos.filter(g => (state.filtro === 'todas' || g.o.status === state.filtro) &&
+      (!q || g.grupo.some(o => [o.cliente.nome, o.veiculo.placa, o.veiculo.modelo, o.cliente.telefone, numFmt(o.numero)].join(' ').toLowerCase().includes(q))));
+    $('#lst').innerHTML = l.map(g => itemHTML(g)).join('') || '<div class="empty">Nenhuma ordem encontrada.</div>';
   };
   $('#q').oninput = draw;
   $$('[data-fl]').forEach(b => b.onclick = () => { state.filtro = b.dataset.fl; $$('[data-fl]').forEach(x => x.classList.toggle('on', x === b)); draw(); });
@@ -465,6 +491,7 @@ function stFotos(o) {
     <label class="btn red">${ic('camera')} Câmera<input type="file" accept="image/*" capture="environment" hidden id="phCam"></label>
     <label class="btn ghost">${ic('image')} Galeria<input type="file" accept="image/*" multiple hidden id="phGal"></label>
   </div>
+  <div id="reusoBox"></div>
   <div class="ph-grid">${o.fotos.map((f, i) => `
     <div class="ph"><img src="${f.data}" alt=""><span class="ph-n">${i + 1}</span>
     <button type="button" class="ph-del" data-del="${i}" aria-label="Remover">${ic('trash', 16)}</button>
@@ -496,6 +523,134 @@ function bFotos(o) {
   $('#phCam').onchange = add; $('#phGal').onchange = add;
   $$('[data-del]').forEach(b => b.onclick = async () => { if (!confirm('Remover esta foto?')) return; const [rm] = o.fotos.splice(+b.dataset.del, 1); Cloud.removePhoto(rm?.path); await persist(); wizard(); });
   $$('[data-leg]').forEach(i => i.oninput = () => o.fotos[+i.dataset.leg].legenda = i.value);
+  $$('.ph img').forEach((im, i) => { im.style.cursor = 'zoom-in'; im.onclick = () => verFotos(o.fotos, i); });
+  reusoFotos(o);
+}
+
+// "Reaproveitar fotos" das visitas anteriores do mesmo veículo (mesma placa)
+async function reusoFotos(o) {
+  const box = $('#reusoBox'); if (!box) return;
+  const hist = historico(o, await DB.all()).filter(h => h.fotos.some(f => f.data));
+  if (!hist.length || $('#reusoBox') !== box) return;
+  const total = hist.reduce((a, h) => a + h.fotos.filter(f => f.data).length, 0);
+  box.innerHTML = `<button type="button" class="reuso">${ic('image', 24)}<div><b>Reaproveitar fotos de visitas anteriores</b>
+    <small>${total} foto(s) em ${hist.length} OS deste veículo · última: OS ${numFmt(hist[0].numero)}, ${fmtDate(hist[0].createdAt)}</small></div>${ic('chev', 18)}</button>`;
+  box.querySelector('button').onclick = () => escolherFotos(o, hist);
+}
+function escolherFotos(o, hist) {
+  const ja = new Set(o.fotos.map(f => f.de).filter(Boolean)); // já reaproveitadas nesta OS
+  const sel = new Set();
+  const el = document.createElement('div'); el.className = 'pick';
+  el.innerHTML = `
+    <div class="pick-top"><b>Escolha as fotos</b><button class="lbx-b" data-x aria-label="Fechar" style="color:var(--text)"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <div class="pick-body"><p class="hint" style="margin:0">As fotos escolhidas entram nesta OS com a data de hoje. Depois você pode remover, trocar ou adicionar outras.</p>
+    ${hist.map(h => `
+      <div class="pick-os"><span><b style="color:var(--text)">OS ${numFmt(h.numero)}</b> · ${fmtDate(h.createdAt)}</span><button type="button" data-all="${h.id}">Selecionar todas</button></div>
+      <div class="pick-grid">${h.fotos.filter(f => f.data).map(f => `<div class="pk ${ja.has(f.path) ? 'ja' : ''}" data-p="${esc(f.path)}"><img src="${f.data}" alt="">${ja.has(f.path) ? '<span>já adicionada</span>' : ''}</div>`).join('')}</div>`).join('')}
+    </div>
+    <div class="pick-foot"><button class="btn red" id="pkOk" disabled>Selecione as fotos</button></div>`;
+  document.body.appendChild(el); document.body.style.overflow = 'hidden';
+  const fotos = new Map(); hist.forEach(h => h.fotos.forEach(f => f.data && fotos.set(f.path, f)));
+  const upd = () => {
+    el.querySelectorAll('.pk').forEach(p => p.classList.toggle('on', sel.has(p.dataset.p)));
+    const b = el.querySelector('#pkOk'); b.disabled = !sel.size;
+    b.textContent = sel.size ? `Adicionar ${sel.size} foto${sel.size > 1 ? 's' : ''}` : 'Selecione as fotos';
+  };
+  const close = () => { el.remove(); document.body.style.overflow = ''; };
+  el.querySelector('[data-x]').onclick = close;
+  el.querySelectorAll('.pk:not(.ja)').forEach(p => p.onclick = () => { sel.has(p.dataset.p) ? sel.delete(p.dataset.p) : sel.add(p.dataset.p); upd(); });
+  el.querySelectorAll('[data-all]').forEach(b => b.onclick = () => {
+    const ps = [...b.parentElement.nextElementSibling.querySelectorAll('.pk:not(.ja)')].map(p => p.dataset.p);
+    const todas = ps.every(p => sel.has(p)); ps.forEach(p => todas ? sel.delete(p) : sel.add(p)); upd();
+  });
+  el.querySelector('#pkOk').onclick = async () => {
+    const agora = new Date().toISOString();
+    // ordem: como aparecem na tela (OS mais nova primeiro)
+    [...fotos.keys()].filter(p => sel.has(p)).forEach(p => {
+      const f = fotos.get(p);
+      o.fotos.push({ data: f.data, w: f.w, h: f.h, legenda: f.legenda || '', path: `${o.id}/${uid()}.jpg`, de: p, em: agora });
+    });
+    close(); await persist(); wizard(); toast(`${sel.size} foto(s) adicionada(s)`);
+  };
+}
+
+/* ===================== visualizador de fotos (ampliar) ===================== */
+function verFotos(fotos, start = 0) {
+  fotos = fotos.filter(f => f.data); if (!fotos.length) return;
+  let i = Math.min(start, fotos.length - 1), s = 1, x = 0, y = 0;
+  const el = document.createElement('div'); el.className = 'lbx';
+  el.innerHTML = `
+    <div class="lbx-top"><span class="lbx-n"></span><span class="lbx-leg"></span>
+      <button class="lbx-b" data-z="1" aria-label="Ampliar"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/></svg></button>
+      <button class="lbx-b" data-x aria-label="Fechar"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <div class="lbx-stage"><img alt=""></div>
+    ${fotos.length > 1 ? `<button class="lbx-nav prev" aria-label="Anterior">${ic('back', 28)}</button><button class="lbx-nav next" aria-label="Próxima">${ic('chev', 28)}</button>` : ''}
+    <div class="lbx-hint">Toque duas vezes ou use dois dedos para ampliar</div>`;
+  document.body.appendChild(el); document.body.style.overflow = 'hidden';
+  const img = el.querySelector('img'), stage = el.querySelector('.lbx-stage');
+  const clamp = () => {
+    if (s <= 1) { s = 1; x = y = 0; return; }
+    const r = stage.getBoundingClientRect(), w = img.offsetWidth * s, h = img.offsetHeight * s;
+    const mx = Math.max(0, (w - r.width) / 2), my = Math.max(0, (h - r.height) / 2);
+    x = Math.max(-mx, Math.min(mx, x)); y = Math.max(-my, Math.min(my, y));
+  };
+  const apply = (anim) => { clamp(); img.style.transition = anim ? 'transform .2s' : 'none'; img.style.transform = `translate(${x}px,${y}px) scale(${s})`; el.classList.toggle('zoomed', s > 1); };
+  const show = n => {
+    i = (n + fotos.length) % fotos.length; s = 1; x = y = 0; apply();
+    img.src = fotos[i].data;
+    el.querySelector('.lbx-n').textContent = `${i + 1} / ${fotos.length}`;
+    el.querySelector('.lbx-leg').textContent = fotos[i].legenda || '';
+  };
+  // zoom em torno de um ponto da tela
+  const zoomAt = (ns, cx, cy, anim) => {
+    const r = stage.getBoundingClientRect(), ox = cx - (r.left + r.width / 2), oy = cy - (r.top + r.height / 2);
+    ns = Math.max(1, Math.min(5, ns));
+    x = ox - (ox - x) * ns / s; y = oy - (oy - y) * ns / s; s = ns; apply(anim);
+  };
+  const close = () => { el.remove(); document.body.style.overflow = ''; document.removeEventListener('keydown', key); };
+  const key = e => { if (e.key === 'Escape') close(); else if (e.key === 'ArrowLeft') show(i - 1); else if (e.key === 'ArrowRight') show(i + 1); };
+  document.addEventListener('keydown', key);
+  el.querySelector('[data-x]').onclick = close;
+  el.querySelector('[data-z]').onclick = () => { const r = stage.getBoundingClientRect(); zoomAt(s > 1 ? 1 : 2.5, r.left + r.width / 2, r.top + r.height / 2, true); };
+  el.querySelector('.prev')?.addEventListener('click', () => show(i - 1));
+  el.querySelector('.next')?.addEventListener('click', () => show(i + 1));
+  stage.addEventListener('wheel', e => { e.preventDefault(); zoomAt(s * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY); }, { passive: false });
+
+  // gestos: arrastar (mover/trocar foto), pinça (zoom), toque duplo (zoom)
+  const pts = new Map(); let start0 = null, pinch = null, lastTap = 0, moved = false;
+  stage.addEventListener('pointerdown', e => {
+    stage.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    moved = false;
+    if (pts.size === 1) start0 = { px: e.clientX, py: e.clientY, x, y };
+    if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), s }; }
+  });
+  stage.addEventListener('pointermove', e => {
+    if (!pts.has(e.pointerId)) return; pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 2 && pinch) {
+      const [a, b] = [...pts.values()]; moved = true;
+      zoomAt(pinch.s * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    } else if (pts.size === 1 && start0) {
+      const dx = e.clientX - start0.px, dy = e.clientY - start0.py;
+      if (Math.abs(dx) + Math.abs(dy) > 6) moved = true;
+      if (s > 1) { x = start0.x + dx; y = start0.y + dy; apply(); }
+      else { img.style.transition = 'none'; img.style.transform = `translateX(${dx}px)`; }
+    }
+  });
+  const up = e => {
+    if (!pts.has(e.pointerId)) return; pts.delete(e.pointerId);
+    if (pts.size < 2) pinch = null;
+    if (pts.size === 1) { const p = [...pts.values()][0]; start0 = { px: p.x, py: p.y, x, y }; return; }
+    if (!start0) return;
+    const dx = e.clientX - start0.px; start0 = null;
+    if (s === 1 && moved) { if (dx < -60) show(i + 1); else if (dx > 60) show(i - 1); else apply(true); return; }
+    if (!moved) {
+      const now = Date.now();
+      if (now - lastTap < 300) { zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY, true); lastTap = 0; }
+      else lastTap = now;
+    }
+  };
+  stage.addEventListener('pointerup', up); stage.addEventListener('pointercancel', up);
+  show(i);
 }
 
 /* --- passo 4: serviços --- */
@@ -598,8 +753,11 @@ async function vOS(id) {
   const o = await DB.get(id); if (!o) return location.hash = '#/ordens';
   setTop('OS ' + numFmt(o.numero), '#/ordens');
   const t = totals(o), done = state.justDone === id; state.justDone = null;
+  const all = await DB.all(), histAll = historico(o, all), lim = num(cfg.histMax), hist = lim ? histAll.slice(0, lim) : histAll;
+  const novo = all.find(x => x.id !== o.id && placaKey(x) && placaKey(x) === placaKey(o) && x.createdAt > o.createdAt); // all: mais nova primeiro
   view.innerHTML = `
   ${done ? `<div class="done-banner">${ic('okc', 34)}<div><b>OS finalizada com sucesso!</b><small>Envie a cópia em PDF para o cliente.</small></div></div>` : ''}
+  ${novo ? `<a class="old-banner" href="#/os/${novo.id}">${ic('clock', 20)}<div><b>Esta é uma visita anterior deste veículo</b><small>A OS mais recente é a ${numFmt(novo.numero)}, de ${fmtDate(novo.createdAt)}. Toque para abrir.</small></div>${ic('chev', 18)}</a>` : ''}
   <div class="card os-head">
     <div class="thumb" style="width:84px;height:66px;${o.fotos[0] ? `background-image:url(${o.fotos[0].data})` : ''}">${o.fotos[0] ? '' : ic('car', 28)}</div>
     <div style="flex:1;min-width:0"><div class="num">OS Nº ${numFmt(o.numero)} · ${fmtDate(o.createdAt)}</div>
@@ -627,6 +785,7 @@ async function vOS(id) {
     <dt style="font-size:16px;color:var(--text)">Total</dt><dd style="font-size:18px;color:var(--red2)">${brl(t.total)}</dd>
   </dl></div>
   ${o.fotos.length ? `<h3 class="sec">Fotos (${o.fotos.length})</h3><div class="thumbs">${o.fotos.map(f => `<img src="${f.data}" alt="">`).join('')}</div>` : ''}
+  ${hist.length ? histHTML(o, hist, histAll.length) : ''}
   <h3 class="sec">Ações</h3>
   <div class="actions">
     <a class="btn ghost" href="#/editar/${o.id}">${ic('edit', 18)} ${o.status === 'concluida' ? 'Editar' : 'Continuar'}</a>
@@ -634,13 +793,81 @@ async function vOS(id) {
   </div>
   <p class="note">No celular, “WhatsApp” e “E-mail” abrem o menu de compartilhamento com o PDF já anexado. No computador, o PDF é baixado e a conversa/e-mail é aberta para você anexar o arquivo.</p>`;
   $$('[data-a]').forEach(b => b.onclick = () => acao(b.dataset.a, o));
+  $$('.thumbs img').forEach((im, i) => im.onclick = () => verFotos(o.fotos, i));
+  $('.os-head .thumb')?.addEventListener('click', () => verFotos(o.fotos, 0));
+  prepHist(o, hist);
+  $$('[data-hf]').forEach(im => im.onclick = () => { const h = hist.find(x => x.id === im.dataset.hf); verFotos(h.fotos.filter(f => f.data), +im.dataset.i); });
+}
+
+// seção "Histórico do veículo": comparação com a visita anterior + um cartão por OS antiga
+function histHTML(o, hist, total = hist.length) {
+  const ant = hist[0], km = kmNum(o.veiculo.km) - kmNum(ant.veiculo.km);
+  const pAgora = problemas(o), pAnt = new Set(problemas(ant).map(p => p.k));
+  const repet = pAgora.filter(p => pAnt.has(p.k));
+  const comp = [
+    kmNum(o.veiculo.km) && kmNum(ant.veiculo.km) && km >= 0 ? `<b>+${km.toLocaleString('pt-BR')} km</b> rodados desde a última visita` : '',
+    `Última visita há <b>${diasTxt(ant.createdAt, o.createdAt)}</b> (OS ${numFmt(ant.numero)})`,
+    repet.length ? `<span class="rep">Problema(s) que se repetem: ${repet.map(p => esc(p.it)).join(', ')}</span>` : '',
+  ].filter(Boolean);
+  const chips = ps => ps.map(p => `<span class="pchip ${p.st}">${esc(p.it)}</span>`).join('');
+  return `
+  <h3 class="sec">Histórico do veículo (${hist.length} visita${hist.length > 1 ? 's' : ''} anterior${hist.length > 1 ? 'es' : ''})</h3>
+  <div class="card hist-cmp">${comp.map(c => `<div>${c}</div>`).join('')}${total > hist.length ? `<div>Mostrando as ${hist.length} visitas mais recentes de ${total} (ajuste em Configurações).</div>` : ''}</div>
+  ${hist.map(h => {
+    const ps = problemas(h), r = resultado(h), fs = h.fotos.filter(f => f.data);
+    return `
+    <div class="card hist-c">
+      <a class="hist-h" href="#/os/${h.id}"><div><b>OS ${numFmt(h.numero)}</b> · ${fmtDate(h.createdAt)}</div>${statusChip(h)}${ic('chev', 16)}</a>
+      <div class="hist-meta"><span>${h.veiculo.km ? esc(h.veiculo.km) + ' km' : 'KM não informado'}</span><span class="res ${r.cls}">${r.txt}</span><b>${brl(totals(h).total)}</b></div>
+      ${h.reclamacao ? `<div class="hist-l"><small>Reclamação</small>${esc(h.reclamacao)}</div>` : ''}
+      ${ps.length ? `<div class="hist-l"><small>Problemas encontrados</small><div class="pchips">${chips(ps)}</div></div>` : ''}
+      ${h.servicos.length ? `<div class="hist-l"><small>Serviços e peças</small>${h.servicos.map(s => esc(s.desc)).filter(Boolean).join(' · ')}</div>` : ''}
+      ${fs.length ? `<div class="hthumbs">${fs.map((f, i) => `<img src="${f.data}" data-hf="${h.id}" data-i="${i}" alt="">`).join('')}</div>` : ''}
+    </div>`;
+  }).join('')}`;
+}
+function diasTxt(a, b) {
+  const d = Math.max(0, Math.round((new Date(b) - new Date(a)) / 864e5));
+  return d === 0 ? 'menos de 1 dia' : d < 60 ? `${d} dia${d > 1 ? 's' : ''}` : `${Math.round(d / 30)} meses`;
 }
 
 /* ===================== PDF / envio ===================== */
 const fileName = o => `OS-${numFmt(o.numero)}-${(o.veiculo.placa || '').replace(/[^\w]/g, '')}.pdf`;
 function getPdf(o) {
-  const c = state.pdf[o.id]; if (c && c.u === o.updatedAt) return c.blob;
-  const blob = buildPDF(o, cfg).output('blob'); state.pdf[o.id] = { u: o.updatedAt, blob }; return blob;
+  const hp = state.hprepV[o.id] || { key: '', hm: [] }, u = o.updatedAt + '|' + hp.key;
+  const c = state.pdf[o.id]; if (c && c.u === u) return c.blob;
+  const blob = buildPDF(o, cfg, hp.hm).output('blob'); state.pdf[o.id] = { u, blob }; return blob;
+}
+// miniatura leve (para o histórico no PDF não ficar pesado)
+const miniCache = new Map();
+function miniatura(f, max = 360) {
+  const k = f.path || f.data.slice(-64);
+  if (!miniCache.has(k)) miniCache.set(k, new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, max / Math.max(img.width, img.height)), w = Math.round(img.width * s), h = Math.round(img.height * s);
+      const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').drawImage(img, 0, 0, w, h);
+      res({ data: c.toDataURL('image/jpeg', 0.7), w, h });
+    };
+    img.onerror = () => res(null);
+    img.src = f.data;
+  }));
+  return miniCache.get(k);
+}
+// prepara o histórico (com miniaturas) que vai para o PDF; roda em segundo plano ao abrir a OS
+function prepHist(o, hist) {
+  const key = hist.map(h => h.id + h.updatedAt).join();
+  if (state.hprepV[o.id]?.key === key) return Promise.resolve();
+  delete state.hprepV[o.id];
+  return state.hprep[o.id] = (async () => {
+    const hm = [];
+    for (const h of hist) {
+      const fs = [];
+      for (const f of h.fotos.filter(f => f.data)) { const m = await miniatura(f); if (m) fs.push({ ...m, legenda: f.legenda }); }
+      hm.push({ ...h, fotos: fs });
+    }
+    state.hprepV[o.id] = { key, hm };
+  })();
 }
 function baixar(blob, name) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
@@ -659,6 +886,7 @@ async function acao(a, o) {
     await DB.del(o.id); Cloud.queueDelete(o); toast('OS excluída'); location.hash = '#/ordens'; return;
   }
   let blob;
+  if (!state.hprepV[o.id] && state.hprep[o.id]) { toast('Preparando o histórico do veículo...'); await state.hprep[o.id]; }
   try { blob = getPdf(o); } catch (e) { console.error(e); toast('Erro ao gerar o PDF: ' + e.message, 4000); return; }
   const name = fileName(o), txt = mensagem(o);
   if (a === 'baixar') { baixar(blob, name); toast('PDF baixado'); return; }
@@ -699,6 +927,12 @@ function vConfig() {
     ${f('E-mail', 'email', 'contato@oficina.com')}${f('Endereço', 'endereco', 'Rua, nº - Bairro - Cidade/UF')}
     ${f('Responsável padrão', 'responsavel')}
     <label class="fld"><span>Próximo número de OS</span><input type="number" min="1" data-c="prox" value="${cfg.prox}"></label>
+  </div>
+  <h3 class="sec">Histórico do veículo</h3>
+  <div class="card form">
+    <label class="fld"><span>Visitas anteriores mostradas na OS e no PDF</span>
+      <select data-c="histMax">${[['0', 'Todas'], ['10', 'Últimas 10'], ['5', 'Últimas 5'], ['3', 'Últimas 3']].map(([v, t]) => `<option value="${v}" ${String(cfg.histMax || '0') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+    <p class="note" style="margin:0">Com muitas visitas, o PDF fica maior. As OS antigas continuam salvas e podem ser abertas pela lista.</p>
   </div>
   ${Cloud.on ? `
   <h3 class="sec">Nuvem</h3>

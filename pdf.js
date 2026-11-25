@@ -2,7 +2,7 @@
 /* Gera o PDF da Ordem de Serviço (A4) com jsPDF, incluindo fotos e assinaturas.
    Depende de: window.jspdf, e das funções/constantes globais de app.js
    (CHECKLIST, ckKey, ckCounts, resultado, totals, brl, numFmt, fmtDate, fmtDateTime, num). */
-function buildPDF(o, cfg) {
+function buildPDF(o, cfg, hist = []) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'mm', format: 'a4', compress: true });
   const W = 210, H = 297, M = 12, CW = W - 2 * M, BOTTOM = H - 16;
@@ -185,6 +185,58 @@ function buildPDF(o, cfg) {
     font('bold', 8.5, TXT); T(fit(n, sw), x + sw / 2, y + sh + 5.5, { align: 'center' });
     font('normal', 7.2, MUT); T(l, x + sw / 2, y + sh + 9, { align: 'center' });
   });
+
+  /* ---------- anexo: histórico do veículo ---------- */
+  if (hist.length) {
+    doc.addPage(); header();
+    section(`Histórico do veículo - ${hist.length} visita${hist.length > 1 ? 's' : ''} anterior${hist.length > 1 ? 'es' : ''}`, 0);
+    font('normal', 7.8, MUT);
+    T(`Placa ${(o.veiculo.placa || '').toUpperCase()} - resumo das ordens de serviço anteriores deste veículo.`, M, y + 1); y += 6;
+    const wrap = (label, text, col = [45, 45, 50]) => {
+      if (!String(text || '').trim()) return;
+      const lw = 24, lines = doc.splitTextToSize(clean(text), CW - lw - 4);
+      ensure(4.2 * Math.min(lines.length, 2) + 2);
+      font('bold', 7.4, MUT); T(label.toUpperCase(), M + 3, y + 3);
+      font('normal', 8.2, col); lines.forEach(l => { ensure(4.4); T(l, M + 3 + lw, y + 3); y += 4.2; });
+      y += 1;
+    };
+    hist.forEach(h => {
+      const r = resultado(h), col = r.cls === 'ok' ? GREEN : r.cls === 'at' ? YEL : r.cls === 'rp' ? RPC : NV;
+      ensure(30);
+      // faixa de título
+      doc.setFillColor(238, 238, 242); doc.roundedRect(M, y, CW, 8, 1.5, 1.5, 'F');
+      doc.setFillColor(...col); doc.rect(M, y, 1.4, 8, 'F');
+      font('bold', 9.5, TXT); T(`OS Nº ${numFmt(h.numero)}`, M + 4, y + 5.4);
+      const tw = doc.getTextWidth(`OS Nº ${numFmt(h.numero)}`);
+      font('normal', 8.2, MUT);
+      T(`${fmtDate(h.createdAt)}   |   ${h.veiculo.km ? h.veiculo.km + ' km' : 'KM não informado'}   |   ${h.status === 'concluida' ? 'Concluída' : 'Em andamento'}`, M + 7 + tw, y + 5.4);
+      font('bold', 9.5, TXT); T(brl(totals(h).total), M + CW - 3, y + 5.4, { align: 'right' });
+      y += 10.5;
+      font('bold', 7.6, col); T(r.txt, M + 3, y + 2.5); font('normal', 7.6, MUT); T(r.sub, M + 5 + doc.getTextWidth(clean(r.txt)) + 2, y + 2.5); y += 5.5;
+      wrap('Reclamação', h.reclamacao);
+      const ps = problemas(h);
+      wrap('Reprovado', ps.filter(p => p.st === 'rp').map(p => p.it).join(', '), RPC);
+      wrap('Atenção', ps.filter(p => p.st === 'at').map(p => p.it).join(', '), YEL);
+      wrap('Serviços', h.servicos.map(s => `${s.desc || (s.tipo === 'peca' ? 'Peça' : 'Serviço')}${num(s.qtd) !== 1 ? ` (${String(num(s.qtd)).replace('.', ',')}x)` : ''} ${brl(num(s.qtd) * num(s.valor))}`).join('; '));
+      wrap('Observações', h.obs);
+      // miniaturas das fotos
+      if (h.fotos.length) {
+        const per = 7, gap = 2.5, tw2 = (CW - (per - 1) * gap) / per, th = tw2 * 0.75;
+        ensure(th + 6);
+        font('bold', 7.4, MUT); T(`FOTOS (${h.fotos.length})`, M + 3, y + 3); y += 5;
+        h.fotos.forEach((f, i) => {
+          if (i % per === 0 && i) { y += th + gap; }
+          if (i % per === 0) ensure(th + 2);
+          const x = M + (i % per) * (tw2 + gap);
+          doc.setFillColor(238, 238, 242); doc.rect(x, y, tw2, th, 'F');
+          const rr = Math.min(tw2 / f.w, th / f.h), w = f.w * rr, hh = f.h * rr;
+          try { doc.addImage(f.data, 'JPEG', x + (tw2 - w) / 2, y + (th - hh) / 2, w, hh, `h${h.id}_${i}`, 'FAST'); } catch (e) { console.warn(e); }
+        });
+        y += th + 3;
+      }
+      y += 5;
+    });
+  }
 
   /* ---------- rodapé ---------- */
   const n = doc.getNumberOfPages(), ger = fmtDateTime(new Date().toISOString());
